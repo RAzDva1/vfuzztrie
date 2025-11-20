@@ -1,2 +1,2 @@
-# prefixfuzz
+# vfuzztrie
 Fuzzy prefix search implementation for Rust and Python.

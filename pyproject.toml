@@ -1,5 +1,5 @@
 [project]
-name = "prefixfuzz"
+name = "vfuzztrie"
 description = "Fuzzy prefix search implementation for Rust and Python."
 requires-python = ">=3.10"
 classifiers = [
@@ -7,6 +7,9 @@ classifiers = [
     "Programming Language :: Python"
 ]
 dynamic = ["version"]
+dependencies = [
+    "fastuuid>=0.14.0",
+]
 
 [build-system]
 requires = ["maturin>=1.8,<2.0"]
@@ -14,7 +17,7 @@ build-backend = "maturin"
 
 [tool.maturin]
 python-source = "python"
-module-name = "prefixfuzz._prefixfuzz"
+module-name = "vfuzztrie._vfuzztrie"
 features = ["pyo3/extension-module"]
 
 [dependency-groups]

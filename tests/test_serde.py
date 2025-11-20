@@ -1,28 +1,21 @@
-from prefixfuzz import prefix_search_builder, PrefixSearch
+from vfuzztrie import prefix_search_builder, PrefixSearch
 import pytest
 
 TERMS = [
-    ("эдисон", 1),
-    ("эдесон", 2),
-    ("эдисон перец", 3),
-    ("эдесон перец", 4),
-    ("эдессо", 5),
-    ("эдессон", 6),
-    ("эдесса", 7),
-    ("эдессан", 8),
-    ("эдесон п", 9)
+    ("эдисон", "123e4567-e89b-12d3-a456-426614174000", 10),
+    ("эдесон", "123e4567-e89b-12d3-a456-426614174001", 5),
+    ("эдиссон перец", "123e4567-e89b-12d3-a456-426614174002", 8),
+    ("эдессон", "123e4567-e89b-12d3-a456-426614174003", 7),
+    ("эдессо", "123e4567-e89b-12d3-a456-426614174004", 6),
 ]
 
 
 @pytest.fixture(scope="module")
 def prefix_search() -> PrefixSearch:
-    return prefix_search_builder.from_nodes(TERMS)
+    return prefix_search_builder.from_nodes_video(TERMS)
 
 
 def test_eq_search(prefix_search: PrefixSearch):
     prefix_search_de: PrefixSearch = PrefixSearch.from_bytes(prefix_search.to_bytes())
 
-    assert prefix_search_de.exact_match("эдессон") == prefix_search.exact_match("эдессон")
-
-    assert len(prefix_search_de.fuzzy_match("эдессон", 2, None)) == 6
-    assert prefix_search_de.fuzzy_match("эдессон", 2, None) == prefix_search.fuzzy_match("эдессон", 2, None)
+    assert prefix_search_de.fuzzy_match_video("эдессон", 1, None) == prefix_search.fuzzy_match_video("эдессон", 1, None)

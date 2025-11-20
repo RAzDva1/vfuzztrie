@@ -1,104 +1,51 @@
-use std::any::Any;
-use std::collections::HashMap;
 use bincode::{Decode, Encode};
 
-pub struct State {
-    map: HashMap<String, Box<dyn Any>>,
-}
+use crate::payload::Payload;
 
-impl State {
-    pub fn new() -> Self {
-        State {
-            map: HashMap::new(),
-        }
-    }
-
-    pub fn put<T: 'static>(&mut self, attr: String, value: T) {
-        self.map.insert(attr, Box::new(value));
-    }
-
-    pub fn get<T: 'static>(&self, attr: &str) -> Option<&T> {
-        self.map
-            .get(attr)
-            .and_then(|value| value.downcast_ref::<T>())
-    }
-}
-
-pub trait Agent {
-    fn initial_state(&mut self) -> State;
-    fn visit_node(&mut self, node_id: u32, payload: Option<u32>, state: &mut State);
-    fn get_children_to_visit(
-        &mut self,
-        node_id: u32,
-        state: &State,
-        children: Vec<(char, u32)>,
-    ) -> Vec<(u32, State)>;
-}
-
-
-#[derive(Encode, Decode)]
+#[derive(Debug, Clone, Encode, Decode)]
 pub struct Trie {
-    node_shifts: Vec<u32>,
-    node_chars: Vec<Option<char>>,
-    node_payloads: Vec<Option<u32>>,
-    child_indices: Vec<u32>,
+    pub node_shifts: Vec<u32>,
+    pub child_labels: Vec<char>,
+    pub child_transitions: Vec<u32>,
+    pub payloads: Vec<Option<Payload>>,
+    pub video_index: Vec<[u8; 16]>,
 }
 
 impl Trie {
-    pub fn from_internal_data(
-        node_shifts: Vec<u32>,
-        node_chars: Vec<Option<char>>,
-        node_payloads: Vec<Option<u32>>,
-        child_indices: Vec<u32>,
-    ) -> Trie {
-        Trie {
-            node_shifts,
-            node_chars,
-            node_payloads,
-            child_indices,
-        }
-    }
-
-    pub fn get_children(&self, node_id: u32) -> Vec<(char, u32)> {
-        let from_shift = self.node_shifts[node_id as usize];
-
-        let to_shift: u32;
-        if node_id + 1 < self.node_shifts.len() as u32 {
-            to_shift = self.node_shifts[(node_id + 1) as usize];
+    pub fn children_range(&self, node_id: usize) -> std::ops::Range<usize> {
+        let start = self.node_shifts[node_id] as usize;
+        let end = if node_id + 1 < self.node_shifts.len() {
+            self.node_shifts[node_id + 1] as usize
         } else {
-            to_shift = self.child_indices.len() as u32;
-        }
-
-        let mut children = Vec::new();
-        for child_shift in from_shift..to_shift {
-            let child_id = self.child_indices[child_shift as usize];
-            children.push((self.node_chars[child_id as usize].unwrap(), child_id))
-        }
-
-        children
+            self.child_transitions.len()
+        };
+        start..end
     }
 
-    pub fn dfs<A: Agent>(&self, agent: &mut A) {
-        let initial_state = agent.initial_state();
+    pub fn children(&self, node_id: usize) -> impl Iterator<Item = usize> + '_ {
+        self.children_range(node_id)
+            .map(|i| self.child_transitions[i] as usize)
+    }
 
-        let mut stack: Vec<(u32, State)> = Vec::new();
-        stack.push((0, initial_state));
+    pub fn propagate(&mut self, video_top_n: usize) {
+        let n = self.child_labels.len();
 
-        while !stack.is_empty() {
-            let (node_id, mut state) = stack.pop().unwrap();
-            agent.visit_node(node_id, self.node_payloads[node_id as usize], &mut state);
-
-            let children = self.get_children(node_id);
-
-            let mut children_to_visit = agent.get_children_to_visit(node_id, &state, children);
-            children_to_visit.reverse();
-            for (child_id, child_state) in children_to_visit {
-                stack.push((child_id, child_state))
+        for p in self.payloads.iter_mut() {
+            if p.is_none() {
+                *p = Some(Payload::empty());
             }
         }
-    }
 
-    pub fn get_payload(&self, node_id: u32) -> Option<u32> {
-        self.node_payloads[node_id as usize]
+        for node_id in (0..n).rev() {
+            let mut agg = self.payloads[node_id].take().unwrap();
+            for ch in self.children(node_id) {
+                if let Some(ref child_p) = self.payloads[ch] {
+                    let tmp = child_p.clone();
+                    agg.merge_from(&tmp);
+                }
+            }
+            agg.prune(Some(video_top_n));
+            self.payloads[node_id] = Some(agg);
+        }
     }
 }
