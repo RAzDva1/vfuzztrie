@@ -158,24 +158,48 @@ impl PrefixSearch {
             .collect()
     }
 
-    #[pyo3(signature = (term, max_dist = 1, limit = None))]
-    #[pyo3(text_signature = "(term, max_dist=1, limit=None)")]
-    pub fn fuzzy_match_video(&self, term: &str, max_dist: u32, limit: Option<usize>) -> Vec<(String, f64)> {
+    #[pyo3(signature = (term, max_dist = 1, limit = None, include_prefix_nodes = None))]
+    #[pyo3(text_signature = "(term, max_dist=1, limit=None, include_prefix_nodes=None)")]
+    pub fn fuzzy_match_video(
+        &self,
+        term: &str,
+        max_dist: u32,
+        limit: Option<usize>,
+        include_prefix_nodes: Option<bool>,
+    ) -> Vec<(String, f64)> {
         use std::cmp::Ordering;
         use std::collections::HashMap;
 
-        // Fast match by nodes, without prefixes
-        // only_terminals=true: speedup by skipping non-terminals
-        let node_matches = fuzzy_match_nodes(&self.trie, term, max_dist, true, None);
+        // 1) Выбираем режим матчинга по узлам
+        let node_matches = match include_prefix_nodes {
+            Some(true) => {
+                // Search in all nodes including prefixes
+                fuzzy_match_nodes(&self.trie, term, max_dist, false, None)
+            }
+            Some(false) => {
+                // Search in only terminal nodes
+                fuzzy_match_nodes(&self.trie, term, max_dist, true, None)
+            }
+            None => {
+                let m = fuzzy_match_nodes(&self.trie, term, max_dist, true, None);
+                if m.is_empty() {
+                    fuzzy_match_nodes(&self.trie, term, max_dist, false, None)
+                } else {
+                    m
+                }
+            }
+        };
 
         let term_len = term.chars().count() as f64;
         let mut total_prefix_size: f64 = 0.0;
-
         let mut video_scores: HashMap<u32, f64> =
             HashMap::with_capacity(node_matches.len().saturating_mul(16));
 
+        // Penalty for non-terminal nodes
+        const NONTERM_PENALTY: f64 = 0.85;
+
         for m in node_matches.iter() {
-            let coeff = if m.distance == 0 {
+            let mut coeff = if m.distance == 0 {
                 1.0
             } else if term_len == 0.0 {
                 0.0
@@ -185,6 +209,11 @@ impl PrefixSearch {
             if coeff <= 0.0 {
                 continue;
             }
+
+            if !self.trie.terminals[m.node_id] {
+                coeff *= NONTERM_PENALTY;
+            }
+
             if let Some(ref payload) = self.trie.payloads[m.node_id] {
                 total_prefix_size += coeff * (payload.prefix_size as f64);
                 let ids = &payload.video_ids;
@@ -206,11 +235,8 @@ impl PrefixSearch {
             .filter(|&(_, norm)| norm >= 0.01)
             .collect();
 
-        // topk limit by video
         if let Some(k) = limit {
             if scored.len() > k {
-                // select_nth_unstable_by returns tuple 3 elements:
-                // (left, nth_element, right)
                 let _ = scored.select_nth_unstable_by(k, |a, b| {
                     b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal)
                 });
