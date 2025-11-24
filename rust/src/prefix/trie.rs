@@ -9,6 +9,7 @@ pub struct Trie {
     pub child_transitions: Vec<u32>,
     pub payloads: Vec<Option<Payload>>,
     pub video_index: Vec<[u8; 16]>,
+    pub terminals: Vec<bool>,
 }
 
 impl Trie {

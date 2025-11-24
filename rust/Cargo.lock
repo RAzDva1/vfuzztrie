@@ -71,14 +71,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f84267b20a16ea918e43c6a88433c2d54fa145c92a811b5b047ccbe153674483"
 
 [[package]]
-name = "prefixfuzz"
-version = "0.1.1"
-dependencies = [
- "bincode",
- "pyo3",
-]
-
-[[package]]
 name = "proc-macro2"
 version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -227,6 +219,14 @@ name = "unty"
 version = "0.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
+
+[[package]]
+name = "vfuzztrie"
+version = "0.1.2"
+dependencies = [
+ "bincode",
+ "pyo3",
+]
 
 [[package]]
 name = "virtue"

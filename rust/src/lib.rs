@@ -1,13 +1,13 @@
 pub mod prefix;
 
-use crate::prefix::matcher::fuzzy_match;
+use crate::prefix::matcher::{fuzzy_match, fuzzy_match_nodes};
 use crate::prefix::trie::Trie;
 
 mod payload;
 use payload::Payload;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes};
+use pyo3::types::PyBytes;
 
 fn payload_from_py(tup: &pyo3::Bound<'_, pyo3::types::PyTuple>) -> PyResult<Payload> {
     if tup.len() != 3 {
@@ -18,7 +18,9 @@ fn payload_from_py(tup: &pyo3::Bound<'_, pyo3::types::PyTuple>) -> PyResult<Payl
     let video_counts: Vec<u32> = tup.get_item(2)?.extract()?;
 
     if video_ids.len() != video_counts.len() {
-        return Err(pyo3::exceptions::PyValueError::new_err("video_ids and video_counts length mismatch"));
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "video_ids and video_counts length mismatch",
+        ));
     }
 
     Ok(Payload {
@@ -27,6 +29,7 @@ fn payload_from_py(tup: &pyo3::Bound<'_, pyo3::types::PyTuple>) -> PyResult<Payl
         video_counts,
     })
 }
+
 #[pyclass]
 #[derive(Clone)]
 pub struct PrefixSearch {
@@ -53,32 +56,38 @@ impl PrefixSearch {
         video_index: Vec<Vec<u8>>,
         video_top_n: usize,
     ) -> PyResult<Self> {
-
         let n = child_labels.len();
         if node_shifts.len() != n {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "node_shifts len {} != child_labels len {}",
-                node_shifts.len(), n
+                node_shifts.len(),
+                n
             )));
         }
         if payloads.len() != n {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "payloads len {} != child_labels len {}",
-                payloads.len(), n
+                payloads.len(),
+                n
             )));
         }
         for (i, &cid) in child_transitions.iter().enumerate() {
             if (cid as usize) >= n {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                    "child_transitions[{}] = {} out of range [0..{})", i, cid, n
+                    "child_transitions[{}] = {} out of range [0..{})",
+                    i, cid, n
                 )));
             }
         }
+
         // labels → char
         let mut child_labels_char: Vec<char> = Vec::with_capacity(child_labels.len());
         for s in child_labels {
             child_labels_char.push(s.chars().next().unwrap_or('\0'));
         }
+
+        // save terminal flags before payload transformation
+        let terminal_flags: Vec<bool> = payloads.iter().map(|opt| opt.is_some()).collect();
 
         // payloads: expects Tuple( prefix_size, v_ids, v_counts )
         let mut rust_payloads: Vec<Option<Payload>> = Vec::with_capacity(payloads.len());
@@ -112,18 +121,18 @@ impl PrefixSearch {
             child_transitions,
             payloads: rust_payloads,
             video_index: video_index_fixed,
+            terminals: terminal_flags,
         };
 
         trie.propagate(video_top_n);
         Ok(Self { trie })
     }
 
-
     pub fn to_bytes<'py>(&self, py: Python<'py>) -> PyResult<pyo3::Bound<'py, PyBytes>> {
         let cfg = bincode::config::standard();
         let data = bincode::encode_to_vec(&self.trie, cfg)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("encode error: {e}")))?;
-        Ok(PyBytes::new(py, &data)) // new_bound нет в 0.25, new вернёт Bound
+        Ok(PyBytes::new(py, &data))
     }
 
     #[staticmethod]
@@ -142,59 +151,114 @@ impl PrefixSearch {
         matches
             .into_iter()
             .map(|m| {
-                let has_payload = self.trie.payloads[m.node_id].is_some() as i32;
+                // Terminal flags are now stored separately
+                let has_payload = self.trie.terminals[m.node_id] as i32;
                 (m.prefix, has_payload, m.distance)
             })
             .collect()
     }
 
-    #[pyo3(signature = (term, max_dist = 1, limit = None))]
-    #[pyo3(text_signature = "(term, max_dist=1, limit=None)")]
-    pub fn fuzzy_match_video(&self, term: &str, max_dist: u32, limit: Option<usize>) -> Vec<(String, f64)> {
+    #[pyo3(signature = (term, max_dist = 1, limit = None, include_prefix_nodes = None))]
+    #[pyo3(text_signature = "(term, max_dist=1, limit=None, include_prefix_nodes=None)")]
+    pub fn fuzzy_match_video(
+        &self,
+        term: &str,
+        max_dist: u32,
+        limit: Option<usize>,
+        include_prefix_nodes: Option<bool>,
+    ) -> Vec<(String, f64)> {
+        use std::cmp::Ordering;
         use std::collections::HashMap;
 
-        let matches = fuzzy_match(&self.trie, term, max_dist, limit);
-        let mut total_prefix_size: f64 = 0.0;
-        let mut video_scores: HashMap<u32, f64> = HashMap::new();
+        // 1) Выбираем режим матчинга по узлам
+        let node_matches = match include_prefix_nodes {
+            Some(true) => {
+                // Search in all nodes including prefixes
+                fuzzy_match_nodes(&self.trie, term, max_dist, false, None)
+            }
+            Some(false) => {
+                // Search in only terminal nodes
+                fuzzy_match_nodes(&self.trie, term, max_dist, true, None)
+            }
+            None => {
+                let m = fuzzy_match_nodes(&self.trie, term, max_dist, true, None);
+                if m.is_empty() {
+                    fuzzy_match_nodes(&self.trie, term, max_dist, false, None)
+                } else {
+                    m
+                }
+            }
+        };
 
-        for m in matches.iter() {
-            let coeff = if m.prefix == term {
+        let term_len = term.chars().count() as f64;
+        let mut total_prefix_size: f64 = 0.0;
+        let mut video_scores: HashMap<u32, f64> =
+            HashMap::with_capacity(node_matches.len().saturating_mul(16));
+
+        // Penalty for non-terminal nodes
+        const NONTERM_PENALTY: f64 = 0.85;
+
+        for m in node_matches.iter() {
+            let mut coeff = if m.distance == 0 {
                 1.0
-            } else if term.chars().count() == 0 {
+            } else if term_len == 0.0 {
                 0.0
             } else {
-                0.05 * (1.0 - (m.distance as f64) / (term.chars().count() as f64))
+                0.05 * (1.0 - (m.distance as f64) / term_len)
             };
             if coeff <= 0.0 {
                 continue;
             }
+
+            if !self.trie.terminals[m.node_id] {
+                coeff *= NONTERM_PENALTY;
+            }
+
             if let Some(ref payload) = self.trie.payloads[m.node_id] {
                 total_prefix_size += coeff * (payload.prefix_size as f64);
-                for (i, vid) in payload.video_ids.iter().enumerate() {
-                    let cnt = payload.video_counts[i] as f64;
+                let ids = &payload.video_ids;
+                let cnts = &payload.video_counts;
+                for (i, vid) in ids.iter().enumerate() {
+                    let cnt = cnts[i] as f64;
                     *video_scores.entry(*vid).or_insert(0.0) += coeff * cnt;
                 }
             }
         }
 
-        let mut out: Vec<(String, f64)> = Vec::new();
         if total_prefix_size <= 0.0 {
-            return out;
+            return Vec::new();
         }
-        for (vid, sc) in video_scores {
-            let norm = sc / total_prefix_size;
-            if norm >= 0.01 {
-                if let Some(uuid_bytes) = self.trie.video_index.get(vid as usize) {
-                    let s = uuid_to_hyphenated_string(uuid_bytes);
-                    out.push((s, norm));
-                }
+
+        let mut scored: Vec<(u32, f64)> = video_scores
+            .into_iter()
+            .map(|(vid, sc)| (vid, sc / total_prefix_size))
+            .filter(|&(_, norm)| norm >= 0.01)
+            .collect();
+
+        if let Some(k) = limit {
+            if scored.len() > k {
+                let _ = scored.select_nth_unstable_by(k, |a, b| {
+                    b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal)
+                });
+                scored.truncate(k);
+                scored.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+            } else {
+                scored.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+            }
+        } else {
+            scored.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+        }
+
+        let mut out: Vec<(String, f64)> = Vec::with_capacity(scored.len());
+        for (vid, norm) in scored {
+            if let Some(uuid_bytes) = self.trie.video_index.get(vid as usize) {
+                let s = uuid_to_hyphenated_string(uuid_bytes);
+                out.push((s, norm));
             }
         }
-        out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         out
     }
 }
-
 
 fn uuid_to_hyphenated_string(bytes16: &[u8; 16]) -> String {
     use std::fmt::Write;
@@ -216,7 +280,6 @@ fn uuid_to_hyphenated_string(bytes16: &[u8; 16]) -> String {
     }
     s
 }
-
 
 #[pymodule]
 fn _vfuzztrie(py: Python, m: &pyo3::Bound<pyo3::types::PyModule>) -> PyResult<()> {

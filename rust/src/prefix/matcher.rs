@@ -7,87 +7,213 @@ pub struct MatchResult {
     pub distance: u32,
 }
 
+#[derive(Debug, Clone)]
+pub struct NodeMatch {
+    pub node_id: usize,
+    pub distance: u16,
+}
+
+// Go through trie and collect terminal prefixes with distance <= max_dist
 pub fn fuzzy_match(trie: &Trie, term: &str, max_dist: u32, limit: Option<usize>) -> Vec<MatchResult> {
-    #[derive(Clone)]
-    struct State {
-        visited: bool,
-        cur_prefix: String,
-        prev_row: Vec<u32>,
-        cur_row: Vec<u32>,
+    let term_chars: Vec<char> = term.chars().collect();
+    let l = term_chars.len();
+    let max_dist_u16 = max_dist as u16;
+
+    // rows[d] — DP-string for depth d (length = l+1)
+    let max_depth = l + max_dist as usize + 1;
+    let mut rows: Vec<Vec<u16>> = (0..=max_depth).map(|_| vec![0u16; l + 1]).collect();
+
+    for j in 0..=l {
+        rows[0][j] = j as u16;
     }
 
     let mut results: Vec<MatchResult> = Vec::new();
-    let mut stack: Vec<(usize, State)> = Vec::new();
-    let root_state = State {
-        visited: false,
-        cur_prefix: String::new(),
-        prev_row: vec![],
-        cur_row: vec![],
-    };
-    stack.push((0, root_state));
+    let mut prefix_buf: Vec<char> = Vec::new();
 
-    while let Some((node_id, mut st)) = stack.pop() {
-        if !st.visited {
-            if st.cur_prefix.is_empty() {
-                st.cur_row = (0..=term.len() as u32).collect();
-            } else {
-                let mut cur_row: Vec<u32> = Vec::with_capacity(term.len() + 1);
-                cur_row.push(st.prev_row[0] + 1);
-                let last_char = st.cur_prefix.chars().last().unwrap_or('\0');
+    fn dfs(
+        trie: &Trie,
+        node_id: usize,
+        depth: usize,
+        term_chars: &[char],
+        max_dist: u16,
+        rows: &mut [Vec<u16>],
+        results: &mut Vec<MatchResult>,
+        prefix_buf: &mut Vec<char>,
+        limit: Option<usize>,
+    ) -> bool {
+        for cid in trie.children(node_id) {
+            let c = trie.child_labels[cid];
+            if c == '\0' {
+                continue;
+            }
 
-                for (col, tc) in term.chars().enumerate() {
-                    let insert_cost = cur_row[col] + 1;
-                    let delete_cost = st.prev_row[col + 1] + 1;
-                    let replace_cost = if tc != last_char { st.prev_row[col] + 1 } else { st.prev_row[col] };
-                    let m = insert_cost.min(delete_cost).min(replace_cost);
-                    cur_row.push(m);
-                }
-                st.cur_row = cur_row;
+            let i = depth + 1;
 
-                if trie.payloads[node_id].is_some() {
-                    let last = *st.cur_row.last().unwrap_or(&u32::MAX);
-                    if last <= max_dist {
-                        results.push(MatchResult {
-                            node_id,
-                            prefix: st.cur_prefix.clone(),
-                            distance: last,
-                        });
-                    }
+            let (left, right) = rows.split_at_mut(i);
+            let prev = &left[depth];
+            let cur = &mut right[0];
+
+            cur[0] = i as u16;
+
+            let mut min_val = cur[0];
+            for j in 1..=term_chars.len() {
+                let insert_cost = cur[j - 1] + 1;
+                let delete_cost = prev[j] + 1;
+                let replace_cost = prev[j - 1] + if term_chars[j - 1] == c { 0 } else { 1 };
+                let m = insert_cost.min(delete_cost).min(replace_cost);
+                cur[j] = m;
+                if m < min_val {
+                    min_val = m;
                 }
             }
 
-            st.visited = true;
-            stack.push((node_id, st.clone()));
+            if min_val <= max_dist {
+                let last = cur[term_chars.len()];
+                // Add only terminal nodes (real keys)
+                if trie.terminals[cid] && last <= max_dist {
+                    prefix_buf.push(c);
+                    let s: String = prefix_buf.iter().collect();
+                    results.push(MatchResult {
+                        node_id: cid,
+                        prefix: s,
+                        distance: last as u32,
+                    });
+                    prefix_buf.pop();
 
-            let min_in_row = st.cur_row.iter().min().cloned().unwrap_or(u32::MAX);
-            if min_in_row <= max_dist {
-                let mut chs: Vec<(char, usize)> = trie
-                    .children(node_id)
-                    .map(|id| (trie.child_labels[id], id))
-                    .collect();
-                chs.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                    if let Some(lim) = limit {
+                        if results.len() >= lim {
+                            return true; // early stopping
+                        }
+                    }
+                }
 
-                for (_, cid) in chs.into_iter().rev() {
-                    let child_state = State {
-                        visited: false,
-                        cur_prefix: {
-                            let mut s = st.cur_prefix.clone();
-                            if trie.child_labels[cid] != '\0' {
-                                s.push(trie.child_labels[cid]);
-                            }
-                            s
-                        },
-                        prev_row: st.cur_row.clone(),
-                        cur_row: Vec::new(),
-                    };
-                    stack.push((cid, child_state));
+                // Go depper
+                prefix_buf.push(c);
+                if dfs(trie, cid, i, term_chars, max_dist, rows, results, prefix_buf, limit) {
+                    prefix_buf.pop();
+                    return true;
+                }
+                prefix_buf.pop();
+            }
+        }
+        false
+    }
+
+    let _ = dfs(
+        trie,
+        0,
+        0,
+        &term_chars,
+        max_dist_u16,
+        &mut rows,
+        &mut results,
+        &mut prefix_buf,
+        limit,
+    );
+
+    results
+}
+
+// Light version for videos: returns only (node_id, distance), without prefix strings.
+// only_terminals controls whether to add only terminal nodes.
+pub fn fuzzy_match_nodes(
+    trie: &Trie,
+    term: &str,
+    max_dist: u32,
+    only_terminals: bool,
+    node_limit: Option<usize>,
+) -> Vec<NodeMatch> {
+    let term_chars: Vec<char> = term.chars().collect();
+    let l = term_chars.len();
+    let max_dist_u16 = max_dist as u16;
+
+    let max_depth = l + max_dist as usize + 1;
+    let mut rows: Vec<Vec<u16>> = (0..=max_depth).map(|_| vec![0u16; l + 1]).collect();
+    for j in 0..=l {
+        rows[0][j] = j as u16;
+    }
+
+    let mut out: Vec<NodeMatch> = Vec::new();
+
+    fn dfs(
+        trie: &Trie,
+        node_id: usize,
+        depth: usize,
+        term_chars: &[char],
+        max_dist: u16,
+        rows: &mut [Vec<u16>],
+        out: &mut Vec<NodeMatch>,
+        only_terminals: bool,
+        node_limit: Option<usize>,
+    ) -> bool {
+        for cid in trie.children(node_id) {
+            let c = trie.child_labels[cid];
+            if c == '\0' {
+                continue;
+            }
+
+            let i = depth + 1;
+            let (left, right) = rows.split_at_mut(i);
+            let prev = &left[depth];
+            let cur = &mut right[0];
+
+            cur[0] = i as u16;
+
+            let mut min_val = cur[0];
+            for j in 1..=term_chars.len() {
+                let insert_cost = cur[j - 1] + 1;
+                let delete_cost = prev[j] + 1;
+                let replace_cost = prev[j - 1] + if term_chars[j - 1] == c { 0 } else { 1 };
+                let m = insert_cost.min(delete_cost).min(replace_cost);
+                cur[j] = m;
+                if m < min_val {
+                    min_val = m;
+                }
+            }
+
+            if min_val <= max_dist {
+                let last = cur[term_chars.len()];
+                let pass = last <= max_dist
+                    && (!only_terminals || trie.terminals[cid]);
+
+                if pass {
+                    out.push(NodeMatch { node_id: cid, distance: last });
+                    if let Some(lim) = node_limit {
+                        if out.len() >= lim {
+                            return true;
+                        }
+                    }
+                }
+
+                if dfs(
+                    trie,
+                    cid,
+                    i,
+                    term_chars,
+                    max_dist,
+                    rows,
+                    out,
+                    only_terminals,
+                    node_limit,
+                ) {
+                    return true;
                 }
             }
         }
+        false
     }
 
-    if let Some(lim) = limit {
-        results.truncate(lim);
-    }
-    results
+    let _ = dfs(
+        trie,
+        0,
+        0,
+        &term_chars,
+        max_dist_u16,
+        &mut rows,
+        &mut out,
+        only_terminals,
+        node_limit,
+    );
+
+    out
 }
