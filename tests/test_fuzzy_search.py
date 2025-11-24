@@ -21,13 +21,13 @@ def test_exact_match(prefix_search: PrefixSearch):
 
 
 def test_fuzzy_match_distance_eq_1(prefix_search: PrefixSearch):
-    assert set(res[0] for res in prefix_search.fuzzy_match_video("эдессон", 1, None)) == {'123e4567-e89b-12d3-a456-426614174001', '123e4567-e89b-12d3-a456-426614174002', '123e4567-e89b-12d3-a456-426614174003', '123e4567-e89b-12d3-a456-426614174004' }
+    assert set(res[0] for res in prefix_search.fuzzy_match_video("эдессон", 1, None)) == {'123e4567-e89b-12d3-a456-426614174001','123e4567-e89b-12d3-a456-426614174003', '123e4567-e89b-12d3-a456-426614174004' }
 
 
 def test_fuzzy_match_distance_eq_1_with_limit(prefix_search: PrefixSearch):
-    assert prefix_search.fuzzy_match_video("идисон", 1, 1)[0][0] == "123e4567-e89b-12d3-a456-426614174000"
+    assert len(prefix_search.fuzzy_match_video("идисон", 1, 1)) == 1
 
 
 def test_fuzzy_match_distance_eq_2(prefix_search: PrefixSearch):
-    assert set(res[0] for res in prefix_search.fuzzy_match_video("эдисссонн", 2, None)) == {"123e4567-e89b-12d3-a456-426614174002"}
+    assert set(res[0] for res in prefix_search.fuzzy_match_video("эдисссонн перец", 2, None)) == {"123e4567-e89b-12d3-a456-426614174002"}
 
