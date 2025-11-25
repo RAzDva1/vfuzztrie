@@ -3,12 +3,22 @@ use bincode::{Decode, Encode};
 use crate::payload::Payload;
 
 #[derive(Debug, Clone, Encode, Decode)]
+pub enum IdMode {
+    Uuid16,
+    Int32,
+}
+
+#[derive(Debug, Clone, Encode, Decode)]
 pub struct Trie {
     pub node_shifts: Vec<u32>,
     pub child_labels: Vec<char>,
     pub child_transitions: Vec<u32>,
     pub payloads: Vec<Option<Payload>>,
+    // If id_mode == Uuid16 → use video_index
     pub video_index: Vec<[u8; 16]>,
+    // If id_mode == Int32 → use channel_index
+    pub channel_index: Vec<u32>,
+    pub id_mode: IdMode,
     pub terminals: Vec<bool>,
 }
 

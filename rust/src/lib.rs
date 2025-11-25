@@ -1,7 +1,7 @@
 pub mod prefix;
 
 use crate::prefix::matcher::{fuzzy_match, fuzzy_match_nodes};
-use crate::prefix::trie::Trie;
+use crate::prefix::trie::{Trie, IdMode};
 
 mod payload;
 use payload::Payload;
@@ -86,7 +86,7 @@ impl PrefixSearch {
             child_labels_char.push(s.chars().next().unwrap_or('\0'));
         }
 
-        // save terminal flags before payload transformation
+        // terminal flags before payload transformation
         let terminal_flags: Vec<bool> = payloads.iter().map(|opt| opt.is_some()).collect();
 
         // payloads: expects Tuple( prefix_size, v_ids, v_counts )
@@ -102,17 +102,38 @@ impl PrefixSearch {
             }
         }
 
-        // video_index: bytes(16) -> [u8;16]
-        let mut video_index_fixed: Vec<[u8; 16]> = Vec::with_capacity(video_index.len());
-        for v in video_index {
-            if v.len() != 16 {
+        // Autodetect id mode by element size: 16 → UUID, 4 → int32
+        let mut id_mode = IdMode::Uuid16;
+        let mut video_index_fixed: Vec<[u8; 16]> = Vec::new();
+        let mut channel_index_fixed: Vec<u32> = Vec::new();
+
+        if !video_index.is_empty() {
+            let all_16 = video_index.iter().all(|v| v.len() == 16);
+            let all_4 = video_index.iter().all(|v| v.len() == 4);
+
+            if all_16 {
+                id_mode = IdMode::Uuid16;
+                video_index_fixed = Vec::with_capacity(video_index.len());
+                for v in video_index {
+                    let mut arr = [0u8; 16];
+                    arr.copy_from_slice(&v);
+                    video_index_fixed.push(arr);
+                }
+            } else if all_4 {
+                id_mode = IdMode::Int32;
+                channel_index_fixed = Vec::with_capacity(video_index.len());
+                for v in video_index {
+                    let a: [u8; 4] = v
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| pyo3::exceptions::PyValueError::new_err("int32 id must be 4 bytes"))?;
+                    channel_index_fixed.push(u32::from_le_bytes(a));
+                }
+            } else {
                 return Err(pyo3::exceptions::PyValueError::new_err(
-                    "video_index entries must be exactly 16 bytes",
+                    "video_index entries must be all 16 bytes (UUID) or all 4 bytes (int32)",
                 ));
             }
-            let mut arr = [0u8; 16];
-            arr.copy_from_slice(&v);
-            video_index_fixed.push(arr);
         }
 
         let mut trie = Trie {
@@ -121,6 +142,8 @@ impl PrefixSearch {
             child_transitions,
             payloads: rust_payloads,
             video_index: video_index_fixed,
+            channel_index: channel_index_fixed,
+            id_mode,
             terminals: terminal_flags,
         };
 
@@ -151,7 +174,6 @@ impl PrefixSearch {
         matches
             .into_iter()
             .map(|m| {
-                // Terminal flags are now stored separately
                 let has_payload = self.trie.terminals[m.node_id] as i32;
                 (m.prefix, has_payload, m.distance)
             })
@@ -170,16 +192,9 @@ impl PrefixSearch {
         use std::cmp::Ordering;
         use std::collections::HashMap;
 
-        // 1) Выбираем режим матчинга по узлам
         let node_matches = match include_prefix_nodes {
-            Some(true) => {
-                // Search in all nodes including prefixes
-                fuzzy_match_nodes(&self.trie, term, max_dist, false, None)
-            }
-            Some(false) => {
-                // Search in only terminal nodes
-                fuzzy_match_nodes(&self.trie, term, max_dist, true, None)
-            }
+            Some(true) => fuzzy_match_nodes(&self.trie, term, max_dist, false, None),
+            Some(false) => fuzzy_match_nodes(&self.trie, term, max_dist, true, None),
             None => {
                 let m = fuzzy_match_nodes(&self.trie, term, max_dist, true, None);
                 if m.is_empty() {
@@ -195,7 +210,6 @@ impl PrefixSearch {
         let mut video_scores: HashMap<u32, f64> =
             HashMap::with_capacity(node_matches.len().saturating_mul(16));
 
-        // Penalty for non-terminal nodes
         const NONTERM_PENALTY: f64 = 0.85;
 
         for m in node_matches.iter() {
@@ -250,10 +264,21 @@ impl PrefixSearch {
         }
 
         let mut out: Vec<(String, f64)> = Vec::with_capacity(scored.len());
-        for (vid, norm) in scored {
-            if let Some(uuid_bytes) = self.trie.video_index.get(vid as usize) {
-                let s = uuid_to_hyphenated_string(uuid_bytes);
-                out.push((s, norm));
+        match self.trie.id_mode {
+            IdMode::Uuid16 => {
+                for (vid, norm) in scored {
+                    if let Some(uuid_bytes) = self.trie.video_index.get(vid as usize) {
+                        let s = uuid_to_hyphenated_string(uuid_bytes);
+                        out.push((s, norm));
+                    }
+                }
+            }
+            IdMode::Int32 => {
+                for (vid, norm) in scored {
+                    if let Some(ch_id) = self.trie.channel_index.get(vid as usize) {
+                        out.push((format!("{}", ch_id), norm));
+                    }
+                }
             }
         }
         out
