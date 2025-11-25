@@ -2,11 +2,11 @@ from typing import Iterable, List, Tuple, Dict, Optional, Union
 from dataclasses import dataclass
 from collections import Counter
 
+from vfuzztrie import PrefixSearch
 from fastuuid import UUID as FastUUID
 
-from vfuzztrie import PrefixSearch
-
 UUIDLike = Union[str, bytes, "FastUUID"]
+UUIDOrChannelLike = Union[UUIDLike, int]
 
 @dataclass
 class PrefixPack:
@@ -30,10 +30,18 @@ def _uuid_to_16_bytes(u: UUIDLike) -> bytes:
         return bytes.fromhex(hex_str)
     raise TypeError(f"Unsupported UUID type: {type(u)}")
 
-def _build_indices(rows: Iterable[Tuple[str, UUIDLike, int]]):
+def _id_to_bytes(x: UUIDOrChannelLike) -> bytes:
+    # UUID → 16 bytes, channel_id (int32) → 4 bytes (LE)
+    if isinstance(x, int):
+        if x < 0 or x > 0xFFFFFFFF:
+            raise ValueError(f"channel_id out of uint32 range: {x}")
+        return int(x).to_bytes(4, "little", signed=False)
+    return _uuid_to_16_bytes(x)
+
+def _build_indices(rows: Iterable[Tuple[str, UUIDOrChannelLike, int]]):
     """
     Creates:
-    - video_index: List[bytes]
+    - video_index: List[bytes] (16 bytes for UUID, 4 bytes for channel_id)
     - query_index: List[str]
     - reverse_indexes
     """
@@ -43,6 +51,9 @@ def _build_indices(rows: Iterable[Tuple[str, UUIDLike, int]]):
     video_index: List[bytes] = []
     reverse_video_index: Dict[bytes, int] = {}
 
+    # Auto-detect: 'uuid' или 'int32'
+    mode: Optional[str] = None
+
     def get_qid(q: str) -> int:
         qid = reverse_query_index.get(q)
         if qid is None:
@@ -51,33 +62,41 @@ def _build_indices(rows: Iterable[Tuple[str, UUIDLike, int]]):
             reverse_query_index[q] = qid
         return qid
 
-    def get_vid(u: UUIDLike) -> int:
-        u_bytes = _uuid_to_16_bytes(u)
-        vid = reverse_video_index.get(u_bytes)
+    def get_vid(u_or_c: UUIDOrChannelLike) -> int:
+        nonlocal mode
+        cur_is_int = isinstance(u_or_c, int)
+        if mode is None:
+            mode = "int32" if cur_is_int else "uuid"
+        else:
+            if (mode == "int32" and not cur_is_int) or (mode == "uuid" and cur_is_int):
+                raise ValueError("Mixed id types detected: provide either all UUIDs or all int32 channel_ids in one build.")
+        key_bytes = _id_to_bytes(u_or_c)
+        vid = reverse_video_index.get(key_bytes)
         if vid is None:
             vid = len(video_index)
-            video_index.append(u_bytes)
-            reverse_video_index[u_bytes] = vid
+            video_index.append(key_bytes)
+            reverse_video_index[key_bytes] = vid
         return vid
 
     # One-pass build without aggregation
-    for q, uu, _ in rows:
+    for q, uu_or_ch, _ in rows:
         _ = get_qid(q)
-        _ = get_vid(uu)
+        _ = get_vid(uu_or_ch)
 
     return query_index, reverse_query_index, video_index, reverse_video_index
 
-def _accumulate_query_prefix(rows: Iterable[Tuple[str, UUIDLike, int]],
-                             reverse_query_index: Dict[str, int],
-                             reverse_video_index: Dict[bytes, int]) -> Dict[str, PrefixPack]:
+def _accumulate_query_prefix(
+    rows: Iterable[Tuple[str, UUIDOrChannelLike, int]],
+    reverse_query_index: Dict[str, int],
+    reverse_video_index: Dict[bytes, int]
+) -> Dict[str, PrefixPack]:
     """
-    Аггрегирует в разрезе «полный запрос» (лист узла) counters по видео и запросам,
-    складывает prefix_size = сумма кликов по запросу.
+    Aggregates statistics by query prefix.
     """
-    acc: Dict[str, Tuple[int, Counter[int], Counter[int]]] = {}
+    acc: Dict[str, Tuple[int, Counter[int]]] = {}
 
-    for q, uu, cnt in rows:
-        vid = reverse_video_index[_uuid_to_16_bytes(uu)]
+    for q, uu_or_ch, cnt in rows:
+        vid = reverse_video_index[_id_to_bytes(uu_or_ch)]
         prefix_size, vctr = acc.get(q, (0, Counter()))
         prefix_size += cnt
         vctr[vid] += cnt
@@ -114,7 +133,6 @@ def _expand_to_trie_nodes(keys_with_payload: List[Tuple[str, Optional[PrefixPack
 
         for key_pos in range(common_pos + 1, len(key)):
             sorted_data.append((key[:key_pos], None, 1_000_000_000))
-
         sorted_data.append((key, payload, orig_index))
         prev_key = key
 
@@ -158,11 +176,9 @@ def _expand_to_trie_nodes(keys_with_payload: List[Tuple[str, Optional[PrefixPack
 
     payloads = [payload for _, _, payload, _ in data_with_ids]
 
-    # root label = ""
     if child_labels and child_labels[0] is None:
         child_labels[0] = ""
 
-    # sanity
     child_labels = [cl if cl is not None else "" for cl in child_labels]
 
     return node_shifts, child_labels, payloads, child_transitions
@@ -176,19 +192,19 @@ def _pack_to_tuple(pack: PrefixPack | None):
         list(map(int, pack.video_counts)),
     )
 
-def from_nodes_video(rows: List[Tuple[str, UUIDLike, int]]) -> PrefixSearch:
+def from_nodes_video(rows: List[Tuple[str, UUIDOrChannelLike, int]]):
     """
-    Main index builder with video support:
-    - rows: [(query, video_uuid, count), ...]
-    Returns PrefixSearch, where payload is expanded (video_counter),
-    and video_index is added, and fuzzy_match_video method is available
+    Main index builder with UUID (video) or int32 (channel) support.
+    rows: [(query, id, count), ...] where id is UUID-like or int (channel_id).
+    Returns PrefixSearch with fuzzy_match_video usable for both cases:
+      - UUID mode → returns hyphenated UUID strings
+      - Int32 mode → returns decimal channel_id strings
     """
     if not rows:
         node_shifts, child_labels, payloads, child_transitions = [0], [""], [None], []
         return PrefixSearch.from_internal_data_v2(node_shifts, child_labels, payloads, child_transitions, [], [], 10, 25)
 
     query_index, reverse_query_index, video_index, reverse_video_index = _build_indices(rows)
-
     by_query_pack = _accumulate_query_prefix(rows, reverse_query_index, reverse_video_index)
 
     keys_with_payload: List[Tuple[str, Optional[PrefixPack]]] = []
@@ -197,7 +213,6 @@ def from_nodes_video(rows: List[Tuple[str, UUIDLike, int]]) -> PrefixSearch:
         keys_with_payload.append((q, pack))
 
     node_shifts, child_labels, payloads, child_transitions = _expand_to_trie_nodes(keys_with_payload)
-
     payloads = [_pack_to_tuple(p) for p in payloads]
 
     return PrefixSearch.from_internal_data_v2(

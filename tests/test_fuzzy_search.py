@@ -31,3 +31,20 @@ def test_fuzzy_match_distance_eq_1_with_limit(prefix_search: PrefixSearch):
 def test_fuzzy_match_distance_eq_2(prefix_search: PrefixSearch):
     assert set(res[0] for res in prefix_search.fuzzy_match_video("эдисссонн перец", 2, None)) == {"123e4567-e89b-12d3-a456-426614174002"}
 
+
+
+TERMS_CHANNELS = [
+    ("эдисон", 123, 10),
+    ("эдесон", 124, 5),
+    ("эдиссон перец", 5, 8),
+    ("эдессон", 126, 7),
+    ("эдессо", 127, 5),
+]
+
+@pytest.fixture(scope="module")
+def channel_search() -> PrefixSearch:
+    return prefix_search_builder.from_nodes_video(TERMS_CHANNELS)
+
+def test_channel_exact_match(channel_search: PrefixSearch):
+    assert channel_search.fuzzy_match_video("эдисон", 0, 1)[0][1] == 1.0
+    assert int(channel_search.fuzzy_match_video("эдисон", 0, 1)[0][0]) == 123
