@@ -180,14 +180,15 @@ impl PrefixSearch {
             .collect()
     }
 
-    #[pyo3(signature = (term, max_dist = 1, limit = None, include_prefix_nodes = None))]
-    #[pyo3(text_signature = "(term, max_dist=1, limit=None, include_prefix_nodes=None)")]
+    #[pyo3(signature = (term, max_dist = 1, limit = None, include_prefix_nodes = None, min_score = None))]
+    #[pyo3(text_signature = "(term, max_dist=1, limit=None, include_prefix_nodes=None, min_score=None)")]
     pub fn fuzzy_match_video(
         &self,
         term: &str,
         max_dist: u32,
         limit: Option<usize>,
         include_prefix_nodes: Option<bool>,
+        min_score: Option<f64>,
     ) -> Vec<(String, f64)> {
         use std::cmp::Ordering;
         use std::collections::HashMap;
@@ -243,10 +244,12 @@ impl PrefixSearch {
             return Vec::new();
         }
 
+        let effective_min_score = min_score.unwrap_or(0.01);
+
         let mut scored: Vec<(u32, f64)> = video_scores
             .into_iter()
             .map(|(vid, sc)| (vid, sc / total_prefix_size))
-            .filter(|&(_, norm)| norm >= 0.01)
+            .filter(|&(_, norm)| norm >= effective_min_score)
             .collect();
 
         if let Some(k) = limit {

@@ -32,6 +32,33 @@ def test_fuzzy_match_distance_eq_2(prefix_search: PrefixSearch):
     assert set(res[0] for res in prefix_search.fuzzy_match_video("эдисссонн перец", 2, None)) == {"123e4567-e89b-12d3-a456-426614174002"}
 
 
+def test_min_score_default_filters_low_scores_positive(prefix_search: PrefixSearch):
+    """Positive test: default min_score=0.01 filters out low-scoring results."""
+    results_default = prefix_search.fuzzy_match_video("эд", 0, None)
+    results_lower = prefix_search.fuzzy_match_video("эд", 0, None, None, 0.001)
+    assert len(results_lower) >= len(results_default)
+
+
+def test_min_score_zero_returns_all_positive(prefix_search: PrefixSearch):
+    """Positive test: min_score=0.0 returns all videos with any score."""
+    results = prefix_search.fuzzy_match_video("эд", 0, None, None, 0.0)
+    assert len(results) > 0
+
+
+def test_min_score_one_returns_empty_or_exact_negative(prefix_search: PrefixSearch):
+    """Negative test: min_score=1.0 filters out everything except perfect matches."""
+    results = prefix_search.fuzzy_match_video("эдисон", 0, None, None, 1.0)
+    for _, score in results:
+        assert score >= 1.0
+
+
+def test_min_score_none_backward_compatible_positive(prefix_search: PrefixSearch):
+    """Positive test: min_score=None behaves identically to the original hardcoded 0.01."""
+    results_none = prefix_search.fuzzy_match_video("э", 1, None, None, None)
+    results_explicit = prefix_search.fuzzy_match_video("э", 1, None, None, 0.001)
+    assert results_none == results_explicit
+
+
 
 TERMS_CHANNELS = [
     ("эдисон", 123, 10),
